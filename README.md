@@ -6,18 +6,6 @@
 协议编解码 ┃ 同步阻塞 ┃ 无 unsafe ┃ 零第三方运行依赖（关闭 serial 时）
 ```
 
-## 状态
-
-| 项目 | 说明 |
-| --- | --- |
-| 语言 / 版本 | Rust **1.85+**，edition 2021，标准库（非 `no_std`、非 async） |
-| 发布状态 | **未发布**（`publish = false`），通过本地路径引入 |
-| 可选依赖 | `serialport` 4.10.1（`serial` feature，默认开启） |
-| 默认测试 | 16 项集成测试 + 7 项文档测试，**无需硬件** |
-| 许可 | MIT，见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE) |
-
-> **这不是飞特官方的 Rust 发布。** 兼容性按协议家族划分，具体型号是否可用须核对固件寄存器表；本项目不宣称兼容所有型号。
-
 ## 特性
 
 - **多家族统一 API**：`Servo::sms_sts` / `scscl` / `hls` 与 `Imu::new`，字节序、锁地址、字段约束由家族配置决定；
@@ -185,15 +173,3 @@ cargo doc --locked --no-deps
 ```
 
 关闭默认 feature 时核心协议仅依赖标准库；`serialport` 的默认 libudev feature 已关闭，按已知设备路径打开串口无需 Linux libudev 开发包。
-
-## 文档
-
-- [使用指南](docs/USAGE.md)：各家族、同步操作、取消、故障与自定义传输（其中的 Rust 代码由 doctest 编译验证）。
-- [协议及 API 对照](docs/PROTOCOL.md)：寄存器布局、固定上游来源、Python/Go/Rust 对应关系。
-- [AI 二次开发指南](docs/AI_DEVELOPMENT.md)：应用接入与扩展提示词。
-- [验证记录](docs/VALIDATION.md)：已执行的检查与尚未验证的范围。
-- [AGENTS.md](AGENTS.md)：修改本 SDK 的规则。
-
-## 许可
-
-MIT 许可，保留上游版权信息，详见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)。协议与寄存器定义参考官方 [FTServo_Python](https://github.com/ftservo/FTServo_Python)（固定提交见 `docs/PROTOCOL.md`）。
