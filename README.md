@@ -75,7 +75,6 @@ fn main() -> ftservo::Result<()> {
 
 ## 示例
 
-`examples/` 按设备组织，共 24 个入口，与官方 Python 示例一一对应。**默认只编译不执行**；`write`/`sync_write`/`reg_write`/`wheel` 会发送真实运动命令。
 
 ```sh
 # 连通性探测：不带 ID 扫描 0..=252，命中后自动读固件版本/型号（地址 0..=4）
@@ -143,17 +142,5 @@ cargo run --example imu-sync_read -- COM3 2 3
 5. 包最大 250 字节；参数与家族限制在**任何串口 I/O 之前**校验，不自动拆包。
 6. 不自动重试可能已生效的写操作，不隐式启动力矩、切换模式、解锁 EPROM、校准或重置。
 7. `Request` 的取消是协作式的，不能中断任意阻塞的驱动调用。
-
-## 验证
-
-```sh
-cargo fmt --check
-cargo test --locked
-cargo test --locked --no-default-features
-cargo clippy --locked --all-targets --all-features -- -D warnings
-cargo clippy --locked --all-targets --no-default-features -- -D warnings
-cargo build --locked --examples
-cargo doc --locked --no-deps
-```
 
 关闭默认 feature 时核心协议仅依赖标准库；`serialport` 的默认 libudev feature 已关闭，按已知设备路径打开串口无需 Linux libudev 开发包。
