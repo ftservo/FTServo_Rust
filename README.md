@@ -126,15 +126,3 @@ cargo run --example imu-sync_read -- COM3 2 3
 | `src/serial.rs` | 可选 `serialport` 适配层（平台逻辑不侵入协议层） |
 | `src/error.rs` / `src/registers.rs` | 结构化错误与有依据的寄存器表 |
 | `tests/sdk.rs` | 基于模拟传输的无硬件回归测试 |
-
-## 协议与并发约定
-
-1. **一个物理串口只创建一个 `Bus`**；`clone` 共享串口与事务锁，不重新打开端口，不旁路读取端口。
-2. SMS/STS、HLS、IMU 为**小端 word**，SCSCL 为**大端 word**；`u32` 遵循“低 word 在前、每个 word 按家族字节序”，SCSCL 因此**不是**常规大端 u32。
-3. **方向位不是二补码**：位置（非 SCSCL）、速度、电流一般用 bit15，负载/PWM 用 bit10；不要用 `as i16` 直接解释设备值。
-4. 单播 ID 为 `0..=252`，`254` 为广播，`253`/`255` 保留；广播 Ping/Read 非法，同步写无逐设备 ACK。
-5. 包最大 250 字节；参数与家族限制在**任何串口 I/O 之前**校验，不自动拆包。
-6. 不自动重试可能已生效的写操作，不隐式启动力矩、切换模式、解锁 EPROM、校准或重置。
-7. `Request` 的取消是协作式的，不能中断任意阻塞的驱动调用。
-
-关闭默认 feature 时核心协议仅依赖标准库；`serialport` 的默认 libudev feature 已关闭，按已知设备路径打开串口无需 Linux libudev 开发包。
