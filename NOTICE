@@ -1,0 +1,15 @@
+This Rust implementation is based on the FEETECH FTServo_Python protocol,
+register definitions and public API behavior.
+
+FTServo_Python
+https://github.com/ftservo/FTServo_Python
+Revision: cbcfa64674d592f7e5028ae72af42580f60500b4
+Copyright (c) 2024 ftservo
+License: MIT (see LICENSE)
+
+Additional protocol behavior was cross-checked with official FTServo_Arduino:
+https://github.com/ftservo/FTServo_Arduino
+Revision: 64922cda46e56b21b8c1d9e830d936a1941645ae
+
+This is not an official FEETECH Go release. No upstream hardware certification
+or validation of every model in a product family is implied.

@@ -1,0 +1,135 @@
+[package]
+name = "ftservo"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "FEETECH bus SDK for SMS/STS, SCSCL, HLS servos and bus IMUs"
+license = "MIT"
+readme = "README.md"
+publish = false
+
+[features]
+default = ["serial"]
+serial = ["dep:serialport"]
+
+[dependencies]
+serialport = { version = "=4.10.1", default-features = false, optional = true }
+
+[[example]]
+name = "ping"
+required-features = ["serial"]
+
+[[example]]
+name = "sms_sts-read"
+path = "examples/sms_sts/read.rs"
+required-features = ["serial"]
+
+[[example]]
+name = "sms_sts-write"
+path = "examples/sms_sts/write.rs"
+required-features = ["serial"]
+
+[[example]]
+name = "sms_sts-reg_write"
+path = "examples/sms_sts/reg_write.rs"
+required-features = ["serial"]
+
+[[example]]
+name = "sms_sts-sync_read"
+path = "examples/sms_sts/sync_read.rs"
+required-features = ["serial"]
+
+[[example]]
+name = "sms_sts-sync_write"
+path = "examples/sms_sts/sync_write.rs"
+required-features = ["serial"]
+
+[[example]]
+name = "sms_sts-wheel"
+path = "examples/sms_sts/wheel.rs"
+required-features = ["serial"]
+
+[[example]]
+name = "scscl-read"
+path = "examples/scscl/read.rs"
+required-features = ["serial"]
+
+[[example]]
+name = "scscl-write"
+path = "examples/scscl/write.rs"
+required-features = ["serial"]
+
+[[example]]
+name = "scscl-reg_write"
+path = "examples/scscl/reg_write.rs"
+required-features = ["serial"]
+
+[[example]]
+name = "scscl-sync_write"
+path = "examples/scscl/sync_write.rs"
+required-features = ["serial"]
+
+[[example]]
+name = "scscl-wheel"
+path = "examples/scscl/wheel.rs"
+required-features = ["serial"]
+
+[[example]]
+name = "hls-read"
+path = "examples/hls/read.rs"
+required-features = ["serial"]
+
+[[example]]
+name = "hls-write"
+path = "examples/hls/write.rs"
+required-features = ["serial"]
+
+[[example]]
+name = "hls-reg_write"
+path = "examples/hls/reg_write.rs"
+required-features = ["serial"]
+
+[[example]]
+name = "hls-sync_read"
+path = "examples/hls/sync_read.rs"
+required-features = ["serial"]
+
+[[example]]
+name = "hls-sync_write"
+path = "examples/hls/sync_write.rs"
+required-features = ["serial"]
+
+[[example]]
+name = "hls-wheel"
+path = "examples/hls/wheel.rs"
+required-features = ["serial"]
+
+[[example]]
+name = "hls-ofscal"
+path = "examples/hls/ofscal.rs"
+required-features = ["serial"]
+
+[[example]]
+name = "hls-reset"
+path = "examples/hls/reset.rs"
+required-features = ["serial"]
+
+[[example]]
+name = "imu-read_acc"
+path = "examples/imu/read_acc.rs"
+required-features = ["serial"]
+
+[[example]]
+name = "imu-read_gyro"
+path = "examples/imu/read_gyro.rs"
+required-features = ["serial"]
+
+[[example]]
+name = "imu-read_slfp"
+path = "examples/imu/read_slfp.rs"
+required-features = ["serial"]
+
+[[example]]
+name = "imu-sync_read"
+path = "examples/imu/sync_read.rs"
+required-features = ["serial"]
