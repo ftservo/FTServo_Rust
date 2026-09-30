@@ -114,12 +114,6 @@ cargo run --example imu-read_slfp -- COM3 2
 cargo run --example imu-sync_read -- COM3 2 3
 ```
 
-示例约定：
-
-- `read` / `sync_read` 系列为 **50Hz 连续读取**（每 20ms 一轮），无应答或故障只累计计数、不退出循环；每轮打印数据与实测频率（`rounds=`/`failures=`/`rate=`），按 Ctrl+C 停止。控制台渲染可能成为吞吐瓶颈（`rate=` 会如实反映），需要真实 50Hz 时可将输出重定向到文件。
-- `imu-sync_read` 对非最后一个 ID 只显示本轮读取结果，最后一个 ID 输出完整采样；舵机的 `sync_read` 对全部 ID 输出逐字段解释。
-- `write` / `sync_write` 将上游的 `while 1` 无限往复改为有限次（3 次）；均不调用 `enable_torque`，与上游脚本一致——设备未使能力矩时不会运动。
-
 ## 架构
 
 | 模块 | 职责 |
