@@ -1,0 +1,49 @@
+//! Register addresses from the pinned official SDK. Word byte order is per family.
+pub const MODEL: u8 = 3;
+pub const ID: u8 = 5;
+pub const BAUD_RATE: u8 = 6;
+pub const MIN_ANGLE: u8 = 9;
+pub const MAX_ANGLE: u8 = 11;
+pub const CW_DEAD: u8 = 26;
+pub const CCW_DEAD: u8 = 27;
+pub const OFFSET: u8 = 31;
+pub const MODE: u8 = 33;
+pub const TORQUE_ENABLE: u8 = 40;
+pub const ACCELERATION: u8 = 41;
+pub const GOAL_POSITION: u8 = 42;
+pub const GOAL_TIME: u8 = 44;
+pub const GOAL_TORQUE: u8 = 44;
+pub const GOAL_SPEED: u8 = 46;
+pub const SCSCL_LOCK: u8 = 48;
+pub const LOCK: u8 = 55;
+pub const PRESENT_POSITION: u8 = 56;
+pub const PRESENT_SPEED: u8 = 58;
+pub const PRESENT_LOAD: u8 = 60;
+pub const PRESENT_VOLTAGE: u8 = 62;
+pub const PRESENT_TEMPERATURE: u8 = 63;
+pub const MOVING: u8 = 66;
+pub const PRESENT_CURRENT: u8 = 69;
+
+// Device register codes, not host serial baud rates.
+pub const BAUD_1M: u8 = 0;
+pub const BAUD_500K: u8 = 1;
+pub const BAUD_250K: u8 = 2;
+pub const BAUD_128K: u8 = 3;
+pub const BAUD_115200: u8 = 4;
+pub const BAUD_76800: u8 = 5;
+pub const BAUD_57600: u8 = 6;
+pub const BAUD_38400: u8 = 7;
+
+pub const IMU_GYRO_DPS: u8 = 11;
+pub const IMU_ACC_SCALE: u8 = 12;
+pub const IMU_SFLP_ODR: u8 = 13;
+pub const IMU_LOCK: u8 = 55;
+pub const IMU_QUATERNION_X: u8 = 56;
+pub const IMU_QUATERNION_Y: u8 = 58;
+pub const IMU_QUATERNION_Z: u8 = 60;
+pub const IMU_GYRO_X: u8 = 62;
+pub const IMU_GYRO_Y: u8 = 65;
+pub const IMU_GYRO_Z: u8 = 68;
+pub const IMU_ACC_X: u8 = 71;
+pub const IMU_ACC_Y: u8 = 74;
+pub const IMU_ACC_Z: u8 = 77;
