@@ -39,6 +39,11 @@ impl Transport for SerialTransport {
 impl Bus {
     /// Open an 8N1, no-flow-control port. baud=0 selects 1M. Requires an adapter
     /// handling half-duplex direction automatically; software RTS is not toggled.
+    ///
+    /// `timeout` is the **write** budget, not a read one — reads are timed from the protocol
+    /// instead, see [`Bus::command`]. It also seeds the port's own timeout, which
+    /// `serialport` applies to both directions on Windows, so it cannot be dropped; it just
+    /// no longer has anything to do with how long a reply is waited for.
     pub fn open(name: &str, baud: u32, timeout: Duration) -> Result<Self> {
         if name.is_empty() || std::time::Instant::now().checked_add(timeout).is_none() {
             return Err(Error::InvalidArgument("port name or timeout"));
@@ -57,11 +62,12 @@ impl Bus {
             .timeout(write_timeout)
             .open()
             .map_err(io::Error::other)?;
-        Self::new(
+        Self::with_baud(
             SerialTransport {
                 port: p,
                 write_timeout,
             },
+            baud,
             timeout,
         )
     }

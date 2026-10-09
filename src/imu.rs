@@ -1,8 +1,59 @@
-use crate::{
-    encoding::signed15, half_float, registers::*, Batch, Bus, ByteOrder, Device, Error, Request,
-    Result,
-};
+//! The IMU: fused orientation, gyroscope and accelerometer, over the same [`Bus`].
+//!
+//! Addresses live in this module's own [`registers`] table, taken straight from the official
+//! memory map, rather than shared with the servo families.
+
+use self::registers::{ACC_X, GYRO_X, LOCK, QUATERNION_X};
+use crate::{half_float, protocol::signed15, Bus, ByteOrder, Device, Error, Request, Result};
 use std::ops::Deref;
+
+/// The IMU's register table, as published in the official memory map.
+///
+/// Deliberately self-contained. The IMU is not a servo, and the addresses that look shared
+/// are not: its 9 is an LED alarm mask rather than a minimum angle, its 11 is the gyroscope
+/// range rather than a maximum angle, and its 65 is the second gyroscope axis rather than a
+/// status byte. Borrowing from [`crate::registers`] here would apply servo meanings by
+/// accident.
+///
+/// Everything multi-byte is little-endian, and the quaternion's `W` is not stored at all —
+/// it is recovered arithmetically, see [`super::Quaternion`].
+pub mod registers {
+    /// Gyroscope full-scale range: `0` = 4000 dps, `1` = 2000, `2` = 1000.
+    pub const GYRO_DPS: u8 = 11;
+    /// Accelerometer full-scale range: `0` = 16G, `1` = 8G, `2` = 4G, `3` = 2G.
+    pub const ACC_SCALE: u8 = 12;
+    /// SFLP sample rate: `0` = 480, `1` = 240, `2` = 120.
+    pub const SFLP_ODR: u8 = 13;
+    /// EEPROM unlock register.
+    ///
+    /// **Not in the official memory map** — the IMU's configuration block spans 5 to 13 and
+    /// contains no lock register at all. The value is kept so [`super::Imu::new`] behaves
+    /// exactly as it always has; a write here has no documented effect on real hardware.
+    pub const LOCK: u8 = 55;
+    /// Quaternion X, half float.
+    pub const QUATERNION_X: u8 = 56;
+    /// Quaternion Y, half float.
+    pub const QUATERNION_Y: u8 = 58;
+    /// Quaternion Z, half float.
+    pub const QUATERNION_Z: u8 = 60;
+    /// Gyroscope X, a signed 16-bit value whose bit 15 is a direction bit.
+    pub const GYRO_X: u8 = 62;
+    /// Gyroscope Y. The map leaves one undefined byte on either side of it, at 64 and 67.
+    pub const GYRO_Y: u8 = 65;
+    /// Gyroscope Z.
+    pub const GYRO_Z: u8 = 68;
+    /// Accelerometer X, a signed 16-bit value whose bit 15 is a direction bit.
+    pub const ACC_X: u8 = 71;
+    /// Accelerometer Y.
+    pub const ACC_Y: u8 = 74;
+    /// Accelerometer Z.
+    pub const ACC_Z: u8 = 77;
+    /// IMU status: `0` normal, `1` abnormal. Bit 1 means `COMM_ERR`, the link is down.
+    ///
+    /// The IMU's counterpart of a servo's [`SERVO_STATUS`](crate::registers::SERVO_STATUS),
+    /// but at its own address and with its own bits.
+    pub const STATUS: u8 = 79;
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct VectorRaw {
@@ -58,23 +109,6 @@ fn vector(p: &[u8], stride: usize) -> VectorRaw {
         z: word(2 * stride),
     }
 }
-/// Contiguous register read; firmware-side simultaneous latching is not implied.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ImuSample {
-    pub quaternion: Quaternion,
-    pub gyro: VectorRaw,
-    pub acceleration: VectorRaw,
-}
-pub fn decode_imu_sample(p: &[u8]) -> Result<ImuSample> {
-    if p.len() != 23 {
-        return Err(Error::Packet("IMU sample requires 23 bytes"));
-    }
-    Ok(ImuSample {
-        quaternion: Quaternion::from_raw(vector(p, 2))?,
-        gyro: vector(&p[6..], 3),
-        acceleration: vector(&p[15..], 3),
-    })
-}
 #[derive(Clone)]
 pub struct Imu {
     device: Device,
@@ -88,7 +122,7 @@ impl Deref for Imu {
 impl Imu {
     pub fn new(bus: Bus) -> Self {
         Self {
-            device: Device::new(bus, ByteOrder::Little, IMU_LOCK),
+            device: Device::new(bus, ByteOrder::Little, LOCK),
         }
     }
     pub fn without_write_response(mut self) -> Self {
@@ -96,24 +130,51 @@ impl Imu {
         self
     }
     pub fn read_quaternion_raw(&self, r: &Request, id: u8) -> Result<VectorRaw> {
-        Ok(vector(&self.read(r, id, IMU_QUATERNION_X, 6)?, 2))
+        Ok(vector(&self.read(r, id, QUATERNION_X, 6)?, 2))
     }
     pub fn read_quaternion(&self, r: &Request, id: u8) -> Result<Quaternion> {
         Quaternion::from_raw(self.read_quaternion_raw(r, id)?)
     }
     pub fn read_gyro(&self, r: &Request, id: u8) -> Result<VectorRaw> {
-        Ok(vector(&self.read(r, id, IMU_GYRO_X, 8)?, 3))
+        Ok(vector(&self.read(r, id, GYRO_X, 8)?, 3))
     }
     pub fn read_acceleration(&self, r: &Request, id: u8) -> Result<VectorRaw> {
-        Ok(vector(&self.read(r, id, IMU_ACC_X, 8)?, 3))
+        Ok(vector(&self.read(r, id, ACC_X, 8)?, 3))
     }
-    pub fn read_sample(&self, r: &Request, id: u8) -> Result<ImuSample> {
-        decode_imu_sample(&self.read(r, id, IMU_QUATERNION_X, 23)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::registers as reg;
+
+    /// The IMU's addresses against the official memory map. They are deliberately not shared
+    /// with the servo tables — 9, 11 and 65 mean something else there — so each one is
+    /// pinned here rather than inherited.
+    #[test]
+    fn registers_match_the_memory_map() {
+        assert_eq!(reg::GYRO_DPS, 11);
+        assert_eq!(reg::ACC_SCALE, 12);
+        assert_eq!(reg::SFLP_ODR, 13);
+        assert_eq!(reg::LOCK, 55);
+        assert_eq!(reg::QUATERNION_X, 56);
+        assert_eq!(reg::QUATERNION_Y, 58);
+        assert_eq!(reg::QUATERNION_Z, 60);
+        assert_eq!(reg::GYRO_X, 62);
+        // One undefined byte sits either side of the Y axis.
+        assert_eq!(reg::GYRO_Y, 65);
+        assert_eq!(reg::GYRO_Z, 68);
+        assert_eq!(reg::ACC_X, 71);
+        assert_eq!(reg::ACC_Y, 74);
+        assert_eq!(reg::ACC_Z, 77);
+        // Added from IMU.MD: 0 normal, 1 abnormal, bit 1 a dropped link.
+        assert_eq!(reg::STATUS, 79);
     }
-    pub fn sync_read_samples(&self, r: &Request, ids: &[u8]) -> Result<Batch<ImuSample>> {
-        Ok(self
-            .bus
-            .sync_read(r, IMU_QUATERNION_X, 23, ids)?
-            .decode(decode_imu_sample))
+    /// The 23-byte sample block starts at the quaternion and stops one byte short of the
+    /// status register, stepping over the undefined bytes on the way.
+    #[test]
+    fn sample_block_spans_the_strided_fields() {
+        assert_eq!(reg::QUATERNION_X + 23, reg::STATUS);
+        assert_eq!(reg::GYRO_X - reg::QUATERNION_X, 6);
+        assert_eq!(reg::ACC_X - reg::QUATERNION_X, 15);
     }
 }
