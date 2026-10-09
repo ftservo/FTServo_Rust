@@ -1,4 +1,4 @@
-use ftservo::{protocol::*, registers::*, *};
+use ftservo::{protocol::*, *};
 use std::{
     collections::VecDeque,
     io::{self, Read, Write},
@@ -14,6 +14,9 @@ struct State {
     packets: Vec<Vec<u8>>,
     discarded: usize,
     dropped: bool,
+    /// The last window the SDK asked the transport to wait for. The read-path budget is
+    /// asserted against it.
+    last_timeout: Option<Duration>,
 }
 type Reply = Box<dyn Fn(&[u8]) -> Vec<u8> + Send>;
 struct Mock {
@@ -60,8 +63,10 @@ impl Transport for Mock {
         s.rx.clear();
         Ok(())
     }
-    fn set_read_timeout(&mut self, _: Duration) -> io::Result<()> {
-        self.error("timeout")
+    fn set_read_timeout(&mut self, timeout: Duration) -> io::Result<()> {
+        self.error("timeout")?;
+        self.state.lock().unwrap().last_timeout = Some(timeout);
+        Ok(())
     }
 }
 impl Read for Mock {
@@ -113,14 +118,51 @@ fn ack(p: &[u8]) -> Vec<u8> {
 fn bus(p: Mock) -> Bus {
     Bus::new(p, Duration::from_millis(30)).unwrap()
 }
+/// The 15-byte servo feedback block, decoded the way an application does it: the SDK hands
+/// over the bytes and the field codecs, not the block layout, because where each field sits is
+/// a family fact. `unsigned_position` is SCSCL — big-endian words and a plain unsigned
+/// position — where SMS/STS and HLS use little-endian words and a 15-bit direction bit.
+fn decode_feedback(order: ByteOrder, unsigned_position: bool, p: &[u8]) -> Feedback {
+    assert_eq!(p.len(), 15);
+    let word = |i: usize| match order {
+        ByteOrder::Little => u16::from_le_bytes([p[i], p[i + 1]]),
+        ByteOrder::Big => u16::from_be_bytes([p[i], p[i + 1]]),
+    };
+    Feedback {
+        position: if unsigned_position {
+            i32::from(word(0))
+        } else {
+            decode_sign_magnitude(word(0), 15).unwrap()
+        },
+        speed: decode_sign_magnitude(word(2), 15).unwrap(),
+        load: decode_sign_magnitude(word(4), 10).unwrap(),
+        current: decode_sign_magnitude(word(13), 15).unwrap(),
+        voltage: p[6],
+        temperature: p[7],
+        moving: p[10] != 0,
+    }
+}
+/// The IMU's quaternion as it comes off the wire: three half floats at 0x38/0x3A/0x3C, with
+/// `W` recovered arithmetically. Spelled out here for the same reason `decode_feedback` is —
+/// the SDK hands the bytes over instead of decoding a block for the caller.
+fn decode_quaternion(p: &[u8]) -> Result<Quaternion> {
+    let word = |off: usize| u16::from_le_bytes([p[off], p[off + 1]]);
+    Quaternion::from_raw(VectorRaw {
+        x: word(0),
+        y: word(2),
+        z: word(4),
+    })
+}
 
 #[test]
-fn fragmented_noise_and_wrong_id() {
+fn fragmented_noise_and_chunked_arrival() {
+    // One byte at a time, two at a time, then all at once; a header-looking 0xFF 0xFF inside
+    // the noise; and the real reply last. Where a frame ends has to come from its own length
+    // byte, not from how the transport happened to split the bytes.
     for chunk in [1, 2, 256] {
         let (mut p, _) = Mock::new(|_| {
             [
                 vec![9, 255, 0, 255, 255, 255, 255, 1, 1, 0],
-                status(2, 0, &[9, 9]),
                 status(1, 0, &[0x34, 0x12]),
             ]
             .concat()
@@ -136,7 +178,78 @@ fn fragmented_noise_and_wrong_id() {
     }
 }
 #[test]
-fn timeout_checksum_length_and_device_fault() {
+fn reply_from_another_device_is_reported() {
+    // A well-formed frame from an ID nobody asked about is not this transaction's answer: a
+    // unicast request has exactly one legitimate respondent, so it is reported rather than
+    // skipped. `sync_read` is the opposite case and still skips — its reply set is many
+    // devices by design.
+    let (p, _) = Mock::new(|_| status(2, 0, &[9, 9]));
+    assert!(matches!(
+        Servo::sms_sts(bus(p)).read_u16(&Request::new(), 1, 56),
+        Err(Error::UnexpectedId {
+            expected: 1,
+            got: 2
+        })
+    ));
+}
+#[test]
+fn decoded_frames_expose_their_status_code() {
+    let (p, _) = Mock::new(|_| [status(1, 0, &[0; 15]), status(2, 1, &[0; 15])].concat());
+    let b = bus(p);
+    let mut out = Batch::new();
+    b.sync_read_decoded(
+        &Request::new(),
+        registers::PRESENT_POSITION,
+        15,
+        &[1, 2],
+        |p| Ok(decode_feedback(ByteOrder::Little, false, p)),
+        &mut out,
+    )
+    .unwrap();
+    // Both replies carry a code, healthy or not: the status byte reports on the device while
+    // the round itself succeeded. `Feedback` has no field for it, so this channel is the only
+    // way to see it on the typed path — and neither device is missing, because both answered.
+    assert_eq!(out.flags(1), Some(0));
+    assert_eq!(out.flags(2), Some(1));
+    assert_eq!(out.len(), 2);
+    assert!(out.missing.is_empty());
+    assert!(out.errors.is_empty());
+}
+#[test]
+fn corrupt_frame_does_not_end_the_round() {
+    // Device 2's reply is damaged in transit (its checksum byte flipped), device 1's is
+    // intact. The corrupt frame is reported and dropped, but the round keeps going: device 1
+    // is still read rather than being written off as missing because of its neighbour.
+    let (p, _) = Mock::new(|_| {
+        let mut bad = status(2, 0, &[0x11]);
+        let last = bad.len() - 1;
+        bad[last] ^= 0xFF;
+        [bad, status(1, 0, &[0x22])].concat()
+    });
+    let mut out = Batch::new();
+    bus(p)
+        .sync_read(&Request::new(), 56, 1, &[1, 2], &mut out)
+        .unwrap();
+    assert_eq!(out.get(1).unwrap().data, vec![0x22]);
+    assert!(!out.missing.contains(&1));
+    assert!(out.missing.contains(&2));
+    assert!(out.errors.iter().any(|e| matches!(e, Error::Checksum)));
+}
+#[test]
+fn a_stream_without_a_frame_gives_up() {
+    // 0x00 can never begin a frame, and `read_size = 1` makes each byte cost its own round of
+    // `take_frame`, so nothing is ever found. The guard has to end this: without it the loop
+    // keeps reading as long as the transport keeps handing bytes over, which it does here for
+    // 512 bytes — well past the PING threshold of 6 + 250.
+    let (mut p, _) = Mock::new(|_| vec![0u8; 512]);
+    p.read_size = 1;
+    assert!(matches!(
+        bus(p).ping(&Request::new(), 1),
+        Err(Error::Packet("no frame in the whole reply"))
+    ));
+}
+#[test]
+fn timeout_checksum_length_and_device_status() {
     let (p, _) = Mock::new(|_| vec![]);
     assert!(matches!(
         bus(p).ping(&Request::new(), 1),
@@ -161,15 +274,16 @@ fn timeout_checksum_length_and_device_fault() {
         bus(p).read(&Request::new(), 1, 56, 2),
         Err(Error::Packet(_))
     ));
+    // 33 = 0b0010_0001: a non-zero status byte is the device reporting on itself, not a failed
+    // transaction. The reply comes back like any other, with the raw byte in `flags` — the SDK
+    // does not name any of the bits, that is the datasheet's and the application's business.
     let (p, _) = Mock::new(|_| status(1, 33, &[]));
-    let e = bus(p).ping(&Request::new(), 1).unwrap_err();
-    if let Error::Device(e) = e {
-        assert!(e.has(DeviceError::VOLTAGE));
-        assert!(e.has(DeviceError::OVERLOAD));
-        assert_eq!(e.id, 1);
-    } else {
-        panic!("{e}");
-    }
+    let s = bus(p)
+        .command(&Request::new(), 1, PING, &[], Some(0))
+        .unwrap();
+    assert_eq!(s.flags, 33);
+    assert_eq!(s.id, 1);
+    assert!(s.data.is_empty());
 }
 #[test]
 fn sync_partial_fault_duplicate_and_out_of_order() {
@@ -182,31 +296,38 @@ fn sync_partial_fault_duplicate_and_out_of_order() {
         ]
         .concat()
     });
-    let result = bus(p)
-        .sync_read(&Request::new(), 56, 1, &[1, 2, 3])
+    let mut result = Batch::new();
+    bus(p)
+        .sync_read(&Request::new(), 56, 1, &[1, 2, 3], &mut result)
         .unwrap();
     assert!(!result.is_ok());
     assert_eq!(result.missing, vec![3]);
-    assert_eq!(result.values[&1].data, vec![1]);
-    assert_eq!(result.values[&2].flags, 32);
-    assert!(result.errors.iter().any(|e| matches!(e, Error::Device(_))));
+    assert_eq!(result.get(1).unwrap().data, vec![1]);
+    assert_eq!(result.get(2).unwrap().flags, 32);
+    // The status byte is reported with the data, not as an error: only the timeout is one.
     assert!(result
         .errors
         .iter()
         .any(|e| matches!(e, Error::Timeout { .. })));
     let (p, _) = Mock::new(|_| [status(2, 0, &[2]), status(1, 0, &[1])].concat());
-    assert!(bus(p)
-        .sync_read(&Request::new(), 56, 1, &[1, 2])
-        .unwrap()
-        .is_ok());
+    let mut result = Batch::new();
+    bus(p)
+        .sync_read(&Request::new(), 56, 1, &[1, 2], &mut result)
+        .unwrap();
+    assert!(result.is_ok());
 }
 #[test]
 fn malformed_sync_retains_earlier_data() {
     let (p, _) = Mock::new(|_| [status(1, 0, &[1]), status(2, 1, &[])].concat());
-    let b = bus(p).sync_read(&Request::new(), 56, 1, &[1, 2]).unwrap();
+    let mut b = Batch::new();
+    bus(p)
+        .sync_read(&Request::new(), 56, 1, &[1, 2], &mut b)
+        .unwrap();
     assert_eq!(b.values.len(), 1);
     assert_eq!(b.missing, vec![2]);
-    assert_eq!(b.errors.len(), 2);
+    // Only the length mismatch is an error now. Device 2's non-zero status byte comes back
+    // with its (empty) payload instead of being turned into a failure.
+    assert_eq!(b.errors.len(), 1);
 }
 #[test]
 fn validation_before_io() {
@@ -218,8 +339,9 @@ fn validation_before_io() {
     assert!(b.read(&r, 1, 0, 245).is_err());
     assert!(b.write(&r, 255, 0, &[1]).is_err());
     assert!(b.write(&r, 1, 0, &[]).is_err());
-    assert!(b.sync_read(&r, 0, 1, &[1, 1]).is_err());
-    assert!(b.sync_read(&r, 0, 1, &[]).is_err());
+    let mut out = Batch::new();
+    assert!(b.sync_read(&r, 0, 1, &[1, 1], &mut out).is_err());
+    assert!(b.sync_read(&r, 0, 1, &[], &mut out).is_err());
     assert!(b
         .sync_write(
             &r,
@@ -274,24 +396,24 @@ fn validation_before_io() {
         .is_err());
     assert!(scs.write_position(&r, Motion::new(1, -1)).is_err());
     assert!(scs.write_pwm(&r, 1, 1024).is_err());
-    assert!(matches!(
-        scs.sync_read_feedback(&r, &[1]),
-        Err(Error::Unsupported(_))
-    ));
-    assert!(sms.reset(&r, 1).is_err());
     assert!(scs.wheel_mode(&r, 1).is_err());
     assert!(s.lock().unwrap().packets.is_empty());
 }
 #[test]
-fn cancelled_deadline_and_closed() {
+fn cancelled_timeout_and_closed() {
     let (p, s) = Mock::new(|_| vec![]);
     let b = bus(p);
     let r = Request::new();
     r.clone().cancel();
     assert!(matches!(b.ping(&r, 1), Err(Error::Cancelled)));
     assert!(s.lock().unwrap().packets.is_empty());
-    let r = Request::with_timeout(Duration::from_millis(3)).unwrap();
-    assert!(matches!(b.ping(&r, 1), Err(Error::DeadlineExceeded)));
+    // Nothing answers, so the transaction spends its own budget (PING's is about 1.6 ms) and
+    // gives up: `Timeout` is the honest answer for "the frame never arrived", and there is no
+    // caller-supplied deadline left to blame instead.
+    assert!(matches!(
+        b.ping(&Request::new(), 1),
+        Err(Error::Timeout { .. })
+    ));
     let clone = b.clone();
     b.close().unwrap();
     b.close().unwrap();
@@ -311,8 +433,13 @@ fn cancel_queued_and_active_requests() {
     let worker = b.clone();
     let join = thread::spawn(move || worker.ping(&Request::new(), 1));
     entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-    let r = Request::with_timeout(Duration::from_millis(3)).unwrap();
-    assert!(matches!(b.ping(&r, 2), Err(Error::DeadlineExceeded)));
+    // The queued request gives up when the transaction's own budget runs out — PING's is
+    // about 1.6 ms — rather than at a timeout of the caller's choosing.
+    let r = Request::new();
+    assert!(matches!(
+        b.ping(&r, 2),
+        Err(Error::Timeout { partial: false })
+    ));
     release_tx.send(()).unwrap();
     join.join().unwrap().unwrap();
     let r = Request::new();
@@ -334,9 +461,9 @@ fn concurrent_mixed_devices_own_entire_transaction() {
         let b = b.clone();
         threads.push(thread::spawn(move || {
             if n % 2 == 0 {
-                Servo::sms_sts(b).read_feedback(&Request::new(), 1).unwrap();
+                Servo::sms_sts(b).read_position(&Request::new(), 1).unwrap();
             } else {
-                Imu::new(b).read_sample(&Request::new(), 2).unwrap();
+                Imu::new(b).read_quaternion(&Request::new(), 2).unwrap();
             }
         }));
     }
@@ -370,14 +497,15 @@ fn no_response_and_broadcast() {
     b.reg_write_only(&r, 1, 40, &[0]).unwrap();
     b.action(&r, BROADCAST_ID).unwrap();
     let hls = Servo::hls(b.clone()).without_write_response();
+    // `reset` sits on `Device` beside `ping`, not on the servo layer: the instruction is the
+    // protocol's, so any handle on the bus sends it — here an HLS servo and an IMU.
     hls.reset(&r, 1).unwrap();
     hls.calibrate_offset(&r, 1, 1024).unwrap();
     hls.action(&r, 1).unwrap();
-    Imu::new(b)
-        .without_write_response()
-        .lock_eprom(&r, 2)
-        .unwrap();
-    assert_eq!(s.lock().unwrap().packets.len(), 8);
+    let imu = Imu::new(b).without_write_response();
+    imu.lock_eprom(&r, 2).unwrap();
+    imu.reset(&r, 2).unwrap();
+    assert_eq!(s.lock().unwrap().packets.len(), 9);
 }
 #[test]
 fn signed_and_binary16() {
@@ -421,8 +549,11 @@ fn hls_negative_position_and_modes() {
     h.torque_mode(&r, 1).unwrap();
     h.write_torque(&r, 1, -300).unwrap();
     let packets = &s.lock().unwrap().packets;
-    assert_eq!(&packets[4][5..7], &[MODE, 2]);
-    assert_eq!(&packets[5][5..8], &[GOAL_TORQUE, 0x2c, 0x81]);
+    assert_eq!(&packets[4][5..7], &[hls::registers::MODE, 2]);
+    assert_eq!(
+        &packets[5][5..8],
+        &[hls::registers::GOAL_TORQUE, 0x2c, 0x81]
+    );
 }
 #[test]
 fn feedback_orders_and_convenience() {
@@ -447,7 +578,8 @@ fn feedback_orders_and_convenience() {
         });
         let s = Servo::new(bus(p), family);
         let r = Request::new();
-        let f = s.read_feedback(&r, 1).unwrap();
+        let raw = s.read(&r, 1, registers::PRESENT_POSITION, 15).unwrap();
+        let f = decode_feedback(s.byte_order(), family == Family::Scscl, &raw);
         let position = if family == Family::Scscl { 0x800a } else { -10 };
         assert_eq!(
             f,
@@ -495,14 +627,13 @@ fn imu_stride_quaternion_and_batches() {
     });
     let i = Imu::new(bus(p));
     let r = Request::new();
-    let sample = i.read_sample(&r, 3).unwrap();
-    assert_eq!(sample.gyro.signed(), Vector { x: -1, y: 2, z: -3 });
-    assert_eq!(sample.acceleration.signed(), Vector { x: 4, y: -5, z: 6 });
-    assert!((sample.quaternion.w - 0.75f64.sqrt()).abs() < 1e-12);
-    assert_eq!(i.read_gyro(&r, 3).unwrap(), sample.gyro);
-    assert_eq!(i.read_acceleration(&r, 3).unwrap(), sample.acceleration);
-    assert_eq!(i.read_quaternion(&r, 3).unwrap(), sample.quaternion);
-    assert!(decode_imu_sample(&data[..22]).is_err());
+    let quaternion = i.read_quaternion(&r, 3).unwrap();
+    let gyro = i.read_gyro(&r, 3).unwrap();
+    let acceleration = i.read_acceleration(&r, 3).unwrap();
+    assert_eq!(gyro.signed(), Vector { x: -1, y: 2, z: -3 });
+    assert_eq!(acceleration.signed(), Vector { x: 4, y: -5, z: 6 });
+    assert!((quaternion.w - 0.75f64.sqrt()).abs() < 1e-12);
+    assert_eq!(quaternion.raw, i.read_quaternion_raw(&r, 3).unwrap());
     assert_eq!(
         Quaternion::from_raw(VectorRaw {
             x: 0x3c00,
@@ -526,16 +657,37 @@ fn imu_stride_quaternion_and_batches() {
         [status(2, 4, &good), status(1, 0, &good), status(3, 0, &bad)].concat()
     });
     let b = bus(p);
-    let batch = Imu::new(b.clone())
-        .sync_read_samples(&r, &[1, 2, 3])
-        .unwrap();
-    assert_eq!(batch.values.len(), 1);
-    assert_eq!(batch.values[&1].quaternion.w, 1.0);
-    assert_eq!(batch.errors.len(), 2);
-    assert!(batch.missing.is_empty());
-    let batch = Servo::hls(b).sync_read_feedback(&r, &[1, 2, 3]).unwrap();
+    let mut batch = Batch::new();
+    b.sync_read_decoded(
+        &r,
+        imu::registers::QUATERNION_X,
+        6,
+        &[1, 2, 3],
+        decode_quaternion,
+        &mut batch,
+    )
+    .unwrap();
+    // Device 2's non-zero status byte no longer stops it from being decoded, so it is a value
+    // like device 1; only device 3's payload is undecodable.
     assert_eq!(batch.values.len(), 2);
+    assert_eq!(batch.get(1).unwrap().w, 1.0);
+    assert_eq!(batch.flags(2), Some(4));
     assert_eq!(batch.errors.len(), 1);
+    assert!(batch.missing.is_empty());
+    let mut batch = Batch::new();
+    b.sync_read_decoded(
+        &r,
+        registers::PRESENT_POSITION,
+        15,
+        &[1, 2, 3],
+        |p| Ok(decode_feedback(ByteOrder::Little, false, p)),
+        &mut batch,
+    )
+    .unwrap();
+    // Servo feedback has no such range check, so those same two bytes decode into something:
+    // all three devices are values here, and nothing at all is an error.
+    assert_eq!(batch.values.len(), 3);
+    assert!(batch.errors.is_empty());
 }
 #[test]
 fn model_and_big_endian_word_pair() {
@@ -573,4 +725,110 @@ fn packet_bounds_and_arbitrary_input() {
             assert!(s.id <= MAX_ID);
         }
     }
+}
+
+#[test]
+fn command_rejects_an_impossible_expected_length() {
+    // `command` is public, so `expected` is caller input. An out-of-range value has to be an
+    // argument error — not an overflowed budget, and not a reply length the protocol cannot
+    // carry. The wrappers bound theirs through `register_range`; this is the direct entry.
+    let (p, _) = Mock::new(ack);
+    let b = bus(p);
+    assert!(matches!(
+        b.command(&Request::new(), 1, 2, &[56, 1], Some(usize::MAX)),
+        Err(Error::InvalidArgument(_))
+    ));
+    assert!(matches!(
+        b.command(&Request::new(), 1, 2, &[56, 1], Some(245)),
+        Err(Error::InvalidArgument(_))
+    ));
+    // The ceiling itself is legal and fails later — on the reply, not the argument.
+    assert!(matches!(
+        b.command(&Request::new(), 1, 2, &[56, 1], Some(244)),
+        Err(Error::Packet(_))
+    ));
+}
+
+/// The read delay is bus state, not per-handle state: every clone sees a change, and a
+/// guard restores the value it found rather than a fixed default, so nesting behaves.
+#[test]
+fn read_delay_is_shared_and_restored() {
+    let (p, _) = Mock::new(ack);
+    let bus = bus(p);
+    let clone = bus.clone();
+
+    assert_eq!(bus.read_delay(), DEFAULT_READ_DELAY);
+
+    // Visible through every handle on the same port.
+    clone.set_read_delay(EEPROM_READ_DELAY);
+    assert_eq!(bus.read_delay(), EEPROM_READ_DELAY);
+
+    // A guard restores what was in force, not the default.
+    {
+        let _slow = bus.with_read_delay(Duration::from_secs(1));
+        assert_eq!(bus.read_delay(), Duration::from_secs(1));
+    }
+    assert_eq!(bus.read_delay(), EEPROM_READ_DELAY);
+
+    // Nested guards unwind to the outer setting.
+    {
+        let _outer = bus.with_read_delay(Duration::from_millis(5));
+        {
+            let _inner = bus.with_read_delay(Duration::from_millis(9));
+            assert_eq!(bus.read_delay(), Duration::from_millis(9));
+        }
+        assert_eq!(bus.read_delay(), Duration::from_millis(5));
+    }
+    assert_eq!(bus.read_delay(), EEPROM_READ_DELAY);
+}
+
+/// The delay reaches the transport: the same read asks for a wider window once the delay
+/// is raised, which is what makes it a read-path budget rather than a bookkeeping value.
+#[test]
+fn the_read_delay_reaches_the_transport() {
+    let (p, s) = Mock::new(|_| status(1, 0, &[0x34, 0x12]));
+    let bus = bus(p);
+
+    bus.read(&Request::new(), 1, 56, 2).unwrap();
+    let normal = s.lock().unwrap().last_timeout.unwrap();
+    assert!(
+        normal >= DEFAULT_READ_DELAY,
+        "a read window of {normal:?} is below the default delay"
+    );
+
+    bus.set_read_delay(EEPROM_READ_DELAY);
+    bus.read(&Request::new(), 1, 56, 2).unwrap();
+    let slow = s.lock().unwrap().last_timeout.unwrap();
+    assert!(
+        slow >= EEPROM_READ_DELAY,
+        "a read window of {slow:?} is below the raised delay"
+    );
+    assert!(
+        normal < slow,
+        "raising the delay did not widen the window ({normal:?} then {slow:?})"
+    );
+}
+
+/// The window follows what is already in hand rather than a predicted total: each read buys
+/// the fixed delay plus the time the bytes collected so far would have taken.
+#[test]
+fn the_read_window_follows_the_bytes_in_hand() {
+    // One byte per read: the last of the eight starts with seven already in hand.
+    let (mut p, s) = Mock::new(|_| status(1, 0, &[0x34, 0x12]));
+    p.read_size = 1;
+    bus(p).read(&Request::new(), 1, 56, 2).unwrap();
+    let dribbled = s.lock().unwrap().last_timeout.unwrap();
+
+    // All eight in one read: nothing is in hand when that only read is issued.
+    let (p, s) = Mock::new(|_| status(1, 0, &[0x34, 0x12]));
+    bus(p).read(&Request::new(), 1, 56, 2).unwrap();
+    let whole = s.lock().unwrap().last_timeout.unwrap();
+
+    assert!(
+        dribbled > whole,
+        "a dribbled read ({dribbled:?}) did not get a wider window than a whole one ({whole:?})"
+    );
+    // The fixed delay is counted on every read, so neither window can fall below it.
+    assert!(dribbled >= DEFAULT_READ_DELAY);
+    assert!(whole >= DEFAULT_READ_DELAY);
 }
