@@ -1,12 +1,12 @@
-//! Continuous 50 Hz read of the full HLS servo feedback block, mirroring the
-//! upstream hls `read.py` and its `while 1` loop. A failing read is counted
-//! and never stops the loop; press Ctrl+C to stop (the serial port is
-//! released on process exit). Every round is printed; console output can
-//! become the throughput limit (see the measured `rate=`), so redirect to a
-//! file when the full 50 Hz cadence matters.
+//! Continuous 50 Hz position read of an HLS servo, mirroring the upstream hls
+//! `read.py` and its `while 1` loop. A failing read is counted and never stops
+//! the loop; press Ctrl+C to stop (the serial port is released on process
+//! exit). Every round is printed; console output can become the throughput
+//! limit (see the measured `rate=`), so redirect to a file when the full 50 Hz
+//! cadence matters.
 //!
 //! usage: cargo run --example hls-read -- PORT ID
-use ftservo::{Feedback, Request, Servo};
+use ftservo::{Request, Servo};
 use std::{
     error::Error,
     time::{Duration, Instant},
@@ -24,19 +24,20 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let bus = common::open_bus(&a[0])?;
     let servo = Servo::hls(bus.clone());
-    let mut last: Option<Feedback> = None;
+    let mut last: Option<i32> = None;
     let mut last_error = String::new();
     let mut round: u64 = 0;
     let mut failures: u64 = 0;
     let mut window = Instant::now();
+    // One `Request` for the whole run: it carries no deadline any more, and a read's time
+    // limit comes from the protocol, so there is nothing to rebuild per round.
+    let r = Request::new();
     loop {
         round += 1;
         let started = Instant::now();
-        // Fresh request per round: the 1 s deadline is absolute per read.
-        let r = Request::with_timeout(Duration::from_secs(1))?;
-        match servo.read_feedback(&r, id) {
-            Ok(feedback) => {
-                last = Some(feedback);
+        match servo.read_position(&r, id) {
+            Ok(position) => {
+                last = Some(position);
                 last_error.clear();
             }
             Err(e) => {
@@ -44,8 +45,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 last_error = e.to_string();
             }
         }
-        match &last {
-            Some(f) => println!("servo {id}: {f:?}"),
+        match last {
+            Some(p) => println!("servo {id}: position={p}"),
             None => println!("servo {id}: no data yet"),
         }
         if !last_error.is_empty() {

@@ -30,11 +30,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut round: u64 = 0;
     let mut failures: u64 = 0;
     let mut window = Instant::now();
+    // One `Request` for the whole run: it carries no deadline any more, and a read's time
+    // limit comes from the protocol, so there is nothing to rebuild per round.
+    let r = Request::new();
     loop {
         round += 1;
         let started = Instant::now();
-        // Fresh request per round: the 1 s deadline is absolute per read.
-        let r = Request::with_timeout(Duration::from_secs(1))?;
         match imu.read_quaternion(&r, id) {
             Ok(q) => {
                 last = Some(q);

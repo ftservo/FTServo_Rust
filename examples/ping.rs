@@ -6,8 +6,7 @@
 //! answers is followed by one READ of the five read-only EPROM bytes at
 //! addresses 0..=4 (firmware version, one reserved byte, model number). The
 //! bytes are shown per address, never composed into one integer, so no byte
-//! order is assumed. Wire frames are printed in hex for comparison with
-//! docs/PROTOCOL.md:
+//! order is assumed. Wire frames are printed in hex, in this form:
 //! TX `FF FF ID LEN INST [PARAMS] CHKSUM`, RX `FF FF ID LEN FLAGS [DATA] CHKSUM`.
 //! RX hex is rebuilt from the decoded reply; the bytes match the wire, but
 //! the SDK does not expose the raw receive buffer.
@@ -16,7 +15,7 @@
 //!        cargo run --example ping -- PORT ID [ID...]
 use ftservo::{
     protocol::{self, encode_packet},
-    Error, Request,
+    Request,
 };
 use std::{
     error::Error as ErrorTrait,
@@ -64,40 +63,39 @@ fn status_frame(id: u8, flags: u8, data: &[u8]) -> Vec<u8> {
 fn read_block(bus: &ftservo::Bus, r: &Request, id: u8) -> Result<(), Box<dyn ErrorTrait>> {
     let tx = encode_packet(id, protocol::READ, &[BLOCK_ADDRESS, BLOCK_LENGTH])?;
     println!("TX: {}", hex(&tx));
-    match bus.read(r, id, BLOCK_ADDRESS, usize::from(BLOCK_LENGTH)) {
-        Ok(data) => {
-            println!("RX: {}", hex(&status_frame(id, 0, &data)));
-            println!("raw: {}", hex(&data));
-            for (i, v) in data.iter().enumerate() {
-                println!(
-                    "  addr {} = 0x{v:02X}  {}",
-                    BLOCK_ADDRESS + i as u8,
-                    BLOCK_LABELS[i]
-                );
-            }
-            Ok(())
-        }
-        Err(Error::Device(e)) => {
-            println!("RX: {}", hex(&status_frame(e.id, e.flags, &[])));
-            Err(e.into())
-        }
-        Err(e) => Err(e.into()),
+    // `command` rather than `read`: it hands back the status byte alongside the payload, and
+    // a non-zero one is the device reporting on itself, not a failed read — the block came
+    // back all the same, so the bytes below are printed either way.
+    let s = bus.command(
+        r,
+        id,
+        protocol::READ,
+        &[BLOCK_ADDRESS, BLOCK_LENGTH],
+        Some(usize::from(BLOCK_LENGTH)),
+    )?;
+    println!("RX: {}", hex(&status_frame(s.id, s.flags, &s.data)));
+    println!("raw: {}", hex(&s.data));
+    for (i, v) in s.data.iter().enumerate() {
+        println!(
+            "  addr {} = 0x{v:02X}  {}",
+            BLOCK_ADDRESS + i as u8,
+            BLOCK_LABELS[i]
+        );
     }
+    Ok(())
 }
 
 /// One unicast probe: PING, then the automatic EPROM block read.
 fn probe(bus: &ftservo::Bus, r: &Request, id: u8) -> Result<(), Box<dyn ErrorTrait>> {
     let tx = encode_packet(id, protocol::PING, &[])?;
     println!("TX: {}", hex(&tx));
-    match bus.ping(r, id) {
-        Ok(()) => println!("RX: {}", hex(&status_frame(id, 0, &[]))),
-        Err(Error::Device(e)) => {
-            println!("RX: {}", hex(&status_frame(e.id, e.flags, &[])));
-            return Err(e.into());
-        }
-        Err(e) => return Err(e.into()),
+    let s = bus.command(r, id, protocol::PING, &[], Some(0))?;
+    println!("RX: {}", hex(&status_frame(s.id, s.flags, &[])));
+    if s.flags == 0 {
+        println!("device {id} answered");
+    } else {
+        println!("device {id} answered with status 0x{:02X}", s.flags);
     }
-    println!("device {id} answered");
     read_block(bus, r, id)
 }
 
@@ -108,21 +106,20 @@ fn main() -> Result<(), Box<dyn ErrorTrait>> {
         return Err(common::arg_error(usage, "expected PORT and optional IDs"));
     }
 
-    // Full scan. The per-ID response window must cover the adapter's
-    // half-duplex turnaround time; 50 ms per ID keeps the sweep reliable
-    // (an empty bus takes about 13 s).
+    // Full scan. Each ID gets the protocol's own budget for a PING — about 1.6 ms at
+    // 1 Mbaud — so a silent ID costs that and no more, and an empty bus sweeps in a couple
+    // of seconds instead of the thirteen a 50 ms per-ID window would take.
     if a.len() == 1 {
         let bus = ftservo::Bus::open(&a[0], 1_000_000, Duration::from_millis(50))?;
-        let r = Request::with_timeout(Duration::from_secs(60))?;
+        let r = Request::new();
         let total = u16::from(ftservo::MAX_ID);
         let progress_width = format!("scanning id {total}/{total} ...").len();
         let mut found = 0;
         for id in 0..=ftservo::MAX_ID {
             print!("\rscanning id {id:>3}/{total} ...");
             io::stdout().flush()?;
-            let hit = match bus.ping(&r, id) {
-                Ok(()) => Some(0u8),
-                Err(Error::Device(e)) => Some(e.flags),
+            let hit = match bus.command(&r, id, protocol::PING, &[], Some(0)) {
+                Ok(s) => Some(s.flags),
                 Err(_) => None,
             };
             if let Some(flags) = hit {

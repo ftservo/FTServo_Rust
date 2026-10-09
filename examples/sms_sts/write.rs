@@ -53,7 +53,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 ..Motion::default()
             },
         )?;
-        println!("wrote position {position}");
+        println!("write position {position}");
         thread::sleep(travel_time(previous, position));
         previous = position;
     }

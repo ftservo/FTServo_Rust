@@ -49,7 +49,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             })
             .collect();
         servo.sync_write_position(&r, &motions)?;
-        println!("sync-wrote position {position} to {ids:?}");
+        println!("sync-write position {position} to {ids:?}");
         thread::sleep(Duration::from_secs(2));
     }
     bus.close()?;

@@ -2,7 +2,7 @@
 //! `wheel.py`: switch mode explicitly, run, stop, then restore position mode.
 //! SMS/STS wheel speed requires torque = 0.
 //! usage: cargo run --example sms_sts-wheel -- PORT ID SPEED [ACCELERATION]
-use ftservo::Servo;
+use ftservo::{Servo, EEPROM_READ_DELAY};
 use std::{error::Error, thread, time::Duration};
 
 #[path = "../common/mod.rs"]
@@ -28,13 +28,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     let bus = common::open_bus(&a[0])?;
     let servo = Servo::sms_sts(bus.clone());
     let r = common::request()?;
-    servo.wheel_mode(&r, id)?;
+    // `MODE` is an EEPROM register: the device spends an erase cycle on it and does not
+    // answer the bus meanwhile, which takes orders of magnitude longer than a register
+    // read. The guard raises the read delay for the write and restores it on the way out.
+    {
+        let _slow = bus.with_read_delay(EEPROM_READ_DELAY);
+        servo.wheel_mode(&r, id)?;
+    }
     println!("wheel mode set; running at speed {speed}");
     servo.write_speed(&r, id, speed, acceleration, 0)?;
     thread::sleep(Duration::from_secs(2));
     servo.write_speed(&r, id, 0, acceleration, 0)?;
     println!("stopped; restoring position mode");
-    servo.position_mode(&r, id)?;
+    {
+        let _slow = bus.with_read_delay(EEPROM_READ_DELAY);
+        servo.position_mode(&r, id)?;
+    }
     bus.close()?;
     Ok(())
 }

@@ -1,6 +1,11 @@
 //! HLS state/turn-count reset, mirroring the upstream hls `reset.py`.
 //! This is the upstream RESET instruction clearing accumulated state
 //! (e.g. multi-turn count); it is not a factory reset of EPROM settings.
+//!
+//! `reset` is a `Device` instruction — `ping`'s neighbour — rather than a
+//! servo-family one, so any handle on the bus can send it. The servo handle
+//! below is simply the natural way to address a servo.
+//!
 //! usage: cargo run --example hls-reset -- PORT ID
 use ftservo::Servo;
 use std::error::Error;

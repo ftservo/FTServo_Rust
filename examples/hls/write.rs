@@ -55,7 +55,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 ..Motion::default()
             },
         )?;
-        println!("wrote position {position} (torque {TORQUE})");
+        println!("write position {position} (torque {TORQUE})");
         thread::sleep(travel_time(previous, position));
         previous = position;
     }
