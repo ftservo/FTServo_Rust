@@ -1,21 +1,22 @@
 # ftservo · 飞特（FEETECH）总线舵机与 IMU 的 Rust SDK
 
-原生 Rust 实现的总线 SDK，覆盖官方 Python SDK 中的 **SMS/STS、SCSCL、HLS/兼容 HTS 系列舵机**以及**总线 IMU**，提供普通读写、同步读写、REG_WRITE/ACTION、反馈解析、EPROM 锁、HLS 重置与偏移校准、IMU 四元数/陀螺仪/加速度等功能。
+原生 Rust 实现的总线 SDK，覆盖官方 Python SDK 中的 **SMS/STS、SCSCL、HLS/兼容 HTS 系列舵机**以及**总线 IMU**，提供普通读写、同步读写、REG_WRITE/ACTION、反馈字段读取、RESET 指令、EPROM 锁、HLS 偏移校准、IMU 四元数/陀螺仪/加速度等功能。
 
-```text
-协议编解码 ┃ 同步阻塞 ┃ 无 unsafe ┃ 零第三方运行依赖（关闭 serial 时）
-```
 
 ## 支持的家族
 
 | 家族 | 字节序 | 覆盖能力 | 限制 |
 | --- | --- | --- | --- |
-| SMS/STS | 小端 word | 位置/速度/加速度写、反馈、同步读写、轮式模式 | 力矩模式不适用；`write_speed` 要求 torque 字段为 0 |
-| SCSCL | **大端** word | 位置写、反馈、PWM 模式与 PWM 输出 | 无模式寄存器、**不支持同步读**；位置为无符号 |
-| HLS / 兼容 HTS | 小端 word | 位置写（含力矩字段）、反馈、同步读写、轮式模式、偏移校准、状态复位 | — |
-| 总线 IMU | 小端 word | 四元数、陀螺仪、加速度、合并采样、多设备同步采样 | 四元数 XYZ 为 binary16，W 由非负根重建 |
+| SMS/STS | 小端 word | 位置/速度写（含加速度字段）、同步读写、轮式模式 | 力矩模式不适用；`write_speed` 要求 torque 字段为 0 |
+| SCSCL | **大端** word | 位置写、PWM 模式与 PWM 输出、同步写 | 无模式寄存器、**无同步读**；位置为无符号 |
+| HLS / 兼容 HTS | 小端 word | 位置/速度写（含加速度、力矩字段）、同步读写、轮式模式、偏移校准 | — |
+| 总线 IMU | 小端 word | 四元数、陀螺仪、加速度 | 四元数 XYZ 为 binary16（半精度浮点 S1E5F10），W 由非负根重建 |
 
 **单位保持寄存器原始值**：位置、速度、电流、电压、温度、量程配置均不做物理量换算；IMU 的 `.signed()` 只解析方向位，不转换为 °/s 或 g。
+
+**反馈块不整体解析**：`PRESENT_POSITION` 起 15 字节的块内布局是家族约定（字节序、方向位、字段偏移），库只提供单字段读取（`read_position`/`read_speed`/…）、原始 `read` 与 `decode_sign_magnitude` 等字段编解码器，整块读法由调用点组合——`examples/hls/sync_read.rs` 与 `examples/sms_sts/sync_read.rs` 各自写出本家族的完整实现，并在多设备上循环使用；`examples/common/mod.rs` 只管与设备无关的 CLI 与节奏。IMU 同理：`QUATERNION_X` 起 15 字节（IMU.MD 内存表中的四元数 QX/QY/QZ + 陀螺仪 WX/WY/WZ 段，止于加速计 AX 之前）由 `examples/imu/sync_read.rs` 自行解析。多设备同步读一律走 `Bus::sync_read_decoded`，库不再提供按设备类型封装的同步读方法。
+
+**RESET 是设备级指令**：`Device::reset` 与 `Device::ping` 同级，属于协议指令而非家族能力，`Servo`、`Imu` 等任何句柄都能发送；HLS 上它的语义是状态/圈数复位，不是恢复出厂设置。
 
 ## 快速开始
 
@@ -30,48 +31,59 @@ cargo test --locked
 
 ```toml
 [dependencies]
-ftservo = { path = "../rust-sdk" }
+ftservo = { path = "../FTServo_Rust" }
 
 # 只使用自定义 Transport，不引入 serialport：
-# ftservo = { path = "../rust-sdk", default-features = false }
+# ftservo = { path = "../FTServo_Rust", default-features = false }
 ```
 
 最小可用示例：
 
 ```rust
-use ftservo::{Bus, Imu, Motion, Request, Servo};
+use ftservo::{decode_sign_magnitude, registers, Batch, Bus, Imu, Motion, Request, Servo};
 use std::time::Duration;
 
 fn main() -> ftservo::Result<()> {
-    // 一个物理串口只创建一个 Bus；clone 共享串口与事务锁，不会重复打开
+    // 一个物理串口只创建一个 Bus；clone 共享串口与事务锁，不会重复打开。
+    // 第三个参数是**写方向**预算；读超时由协议算出，见 Bus::command。
     let bus = Bus::open("COM3", 1_000_000, Duration::from_millis(100))?;
     let servo = Servo::sms_sts(bus.clone());
     let imu = Imu::new(bus.clone());
-    let request = Request::with_timeout(Duration::from_secs(1))?;
+    // Request 只承载取消，不含超时；读的时限来自协议。
+    let request = Request::new();
 
     // 写目标位置：SDK 不自动使能力矩，设备需已处于正确模式并允许输出
     servo.write_position(&request, Motion::new(1, 2048))?;
 
-    // 批量读取：values 保留本次有效结果，errors/missing 表示故障与未应答
-    let batch = servo.sync_read_feedback(&request, &[1, 2])?;
-    for (id, feedback) in &batch.values {
-        println!("servo {id}: {feedback:?}");
+    // 多设备同步读取：事务由 Bus::sync_read_decoded 完成，15 字节反馈块的解析由应用负责
+    // ——块内布局是家族约定（字节序、方向位、字段偏移），库不替调用者猜。这里只取位置两字节
+    // 作示意；完整解析见 examples/hls/sync_read.rs 或 examples/sms_sts/sync_read.rs。
+    let mut batch = Batch::new();
+    bus.sync_read_decoded(
+        &request,
+        registers::PRESENT_POSITION,
+        15,
+        &[1, 2],
+        |p| decode_sign_magnitude(u16::from_le_bytes([p[0], p[1]]), 15),
+        &mut batch,
+    )?;
+    for (id, position) in &batch.values {
+        println!("servo {id}: position={position}");
     }
     if !batch.is_ok() {
         println!("errors={:?} missing={:?}", batch.errors, batch.missing);
     }
 
-    // IMU：原始值 + 方向位解码值
-    let sample = imu.read_sample(&request, 3)?;
-    println!("quaternion: {:?}", sample.quaternion);
-    println!("gyro raw: {:?} signed: {:?}", sample.gyro, sample.gyro.signed());
+    // IMU：四元数由二分之一精度浮点转换而来，W 由非负根重建；陀螺仪/加速度各自单读
+    let quaternion = imu.read_quaternion(&request, 3)?;
+    println!("quaternion: {quaternion:?}");
+    let gyro = imu.read_gyro(&request, 3)?;
+    println!("gyro raw: {gyro:?} signed: {:?}", gyro.signed());
 
     bus.close()?;
     Ok(())
 }
 ```
-
-串口名：Windows 用 `COM3`，Linux 用 `/dev/ttyUSB0`，macOS 用实际 `/dev/cu.*`。适配器需自行处理半双工收发方向，SDK 不切换 RTS。
 
 ## 示例
 
@@ -97,7 +109,7 @@ cargo run --example scscl-reg_write -- COM3 1 500 1500
 cargo run --example scscl-sync_write -- COM3 1 2
 cargo run --example scscl-wheel -- COM3 1 1000
 
-# HLS（运动参数含力矩字段；ofscal 为偏移校准，reset 为状态/圈数复位而非出厂复位）
+# HLS（运动参数含力矩字段；ofscal 为偏移校准；reset 为设备级 RESET 指令，HLS 上表示状态/圈数复位而非出厂复位）
 cargo run --example hls-read -- COM3 1
 cargo run --example hls-write -- COM3 1
 cargo run --example hls-reg_write -- COM3 1 2048 300 20 500
@@ -118,11 +130,10 @@ cargo run --example imu-sync_read -- COM3 2 3
 
 | 模块 | 职责 |
 | --- | --- |
-| `src/protocol.rs` | 编解码、状态帧、ID/包长/寄存器范围校验 |
-| `src/bus.rs` | `Transport` 抽象、共享 `Bus`、完整事务锁、`Request` 取消/截止、`Batch` 部分结果 |
-| `src/device.rs` | 不可变家族字节序、原始寄存器读写、写响应策略、EPROM 锁 |
-| `src/servo.rs` | 家族、运动参数、三类舵机控制与反馈解码 |
-| `src/imu.rs` / `src/encoding.rs` | 间隔布局、四元数、方向位、binary16 |
+| `src/protocol.rs` | 编解码、状态帧、ID/包长/寄存器范围校验、字段编解码（方向位、半精度浮点）、`Device`（家族字节序、原始寄存器读写、写响应策略、EPROM 锁、ping/reset） |
+| `src/bus.rs` | `Transport` 抽象、共享 `Bus`、完整事务锁、`Request` 取消、`Batch` 部分结果 |
+| `src/servo.rs` | 家族规格表、运动参数与校验、三类舵机控制、单字段反馈读取 |
+| `src/imu.rs` | 间隔布局、四元数（binary16 转换、W 重建）、陀螺仪与加速度读取 |
 | `src/serial.rs` | 可选 `serialport` 适配层（平台逻辑不侵入协议层） |
 | `src/error.rs` / `src/registers.rs` | 结构化错误与有依据的寄存器表 |
 | `tests/sdk.rs` | 基于模拟传输的无硬件回归测试 |
