@@ -215,7 +215,7 @@ pub(crate) fn byte_time(baud: u32) -> Duration {
 /// measure (device `Return Delay Time` plus the driver's delivery schedule) is a property of
 /// the setup, so the base carries the margin and a tighter one is available per bus, see
 /// [`Bus::set_read_delay`]. The cost is paid only where there is nothing to read: a scan across
-/// 253 IDs, most of them silent, takes seconds rather than fractions of one.
+/// 254 IDs, most of them silent, takes seconds rather than fractions of one.
 pub const DEFAULT_READ_DELAY: Duration = Duration::from_millis(20);
 
 /// The delay to hold around an EEPROM write.

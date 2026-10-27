@@ -26,9 +26,10 @@ pub mod registers {
     pub const SFLP_ODR: u8 = 13;
     /// EEPROM unlock register.
     ///
-    /// **Not in the official memory map** — the IMU's configuration block spans 5 to 13 and
-    /// contains no lock register at all. The value is kept so [`super::Imu::new`] behaves
-    /// exactly as it always has; a write here has no documented effect on real hardware.
+    /// Outside the configuration block the IMU documents at 5..=13, but the official Python
+    /// SDK publishes it in the same SRAM read/write group (`imu.py`: `IMU_LOCK = 55`) and its
+    /// `LockEprom` / `unLockEprom` write it, so the address is kept as published there rather
+    /// than dropped.
     pub const LOCK: u8 = 55;
     /// Quaternion X, half float.
     pub const QUATERNION_X: u8 = 56;

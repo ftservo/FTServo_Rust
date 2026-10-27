@@ -18,7 +18,15 @@
 use crate::{Bus, DeviceError, Error, Request, Result};
 
 pub const BROADCAST_ID: u8 = 0xFE;
-pub const MAX_ID: u8 = 0xFC;
+/// Highest unicast ID. FEETECH assigns device IDs from 0 to 253; 254 is [`BROADCAST_ID`]
+/// and 255 can never appear on the wire.
+///
+/// The official Python SDK agrees on the bound even though its own constant says otherwise:
+/// `protocol_packet_handler.rxPacket` rejects a status frame when `ID > 0xFD`, while
+/// `scservo_def.MAX_ID = 0xFC` is never read by any of its checks — `ping`, `readTx`,
+/// `reOfsCal` and `reSet` only compare the ID against `BROADCAST_ID`. The receiving side is
+/// what decides whether a device may exist, so 253 is a device ID here too.
+pub const MAX_ID: u8 = 0xFD;
 pub const MAX_PACKET_SIZE: usize = 250;
 pub const PING: u8 = 1;
 pub const READ: u8 = 2;

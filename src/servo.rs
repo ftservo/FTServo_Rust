@@ -8,7 +8,7 @@ use crate::{
     encode_sign_magnitude,
     protocol::{self, signed10, signed15},
     registers::*,
-    Bus, ByteOrder, Device, Error, Request, Result, WriteEntry,
+    Bus, ByteOrder, Device, Error, Request, Result, WriteEntry, BROADCAST_ID,
 };
 use std::ops::Deref;
 
@@ -241,6 +241,17 @@ impl Servo {
         let p = self.motion_bytes(&m)?;
         self.reg_write(r, m.id, self.spec().motion_address, &p)
     }
+    /// The `ACTION` instruction to [`BROADCAST_ID`](crate::BROADCAST_ID): every device that
+    /// took a [`Self::reg_write_position`] executes it now.
+    ///
+    /// The equivalent of the Python SDK's per-family `RegAction`, which is also a broadcast.
+    /// Broadcast rather than unicast on purpose: a registered write exists so that several
+    /// devices can be armed separately and start together, and only a broadcast `ACTION`
+    /// reaches all of them in one transaction. A single addressed device still answers a
+    /// unicast `ACTION` — that is [`crate::Device::action`], which takes the ID.
+    pub fn reg_action(&self, r: &Request) -> Result<()> {
+        self.action(r, BROADCAST_ID)
+    }
     pub fn sync_write_position(&self, r: &Request, motions: &[Motion]) -> Result<()> {
         let entries: Result<Vec<_>> = motions
             .iter()
@@ -332,12 +343,16 @@ impl Servo {
     }
     pub fn calibrate_offset(&self, r: &Request, id: u8, position: u16) -> Result<()> {
         self.require(self.spec().capabilities.calibrate_offset)?;
+        // The argument follows the family's word order, as the Python SDK's `reOfsCal` does
+        // through `scs_lobyte`/`scs_hibyte`. Only HLS has the capability today, so this is
+        // the little-endian case — but spelling it through `order` keeps the rule uniform.
+        let bytes = self.order.bytes(position);
         self.bus
             .command(
                 r,
                 id,
                 protocol::OFFSET_CALIBRATION,
-                &position.to_le_bytes(),
+                &bytes,
                 self.reply.then_some(0),
             )
             .map(|_| ())
@@ -423,8 +438,10 @@ pub mod scscl {
         pub const GOAL_TIME: u8 = 44;
         /// Present current.
         ///
-        /// **Not in the official memory map** for this family. Kept at its historical value
-        /// so `Servo::read_current` behaves exactly as it always has.
+        /// Shared with the other two families, and confirmed against the official Python SDK
+        /// for this one as well (`scscl.py`: `SCSCL_PRESENT_CURRENT_L = 69`,
+        /// `SCSCL_PRESENT_CURRENT_H = 70`), so `Servo::read_current` reads a documented
+        /// register here rather than a historical guess.
         pub const PRESENT_CURRENT: u8 = 69;
     }
 
