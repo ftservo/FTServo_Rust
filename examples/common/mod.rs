@@ -19,14 +19,14 @@ use std::{
 
 pub const USAGE_PREFIX: &str = "usage: cargo run --example <name> --";
 
-/// Parse a unicast device ID (0..=252; 253/255 are reserved, 254 is broadcast).
+/// Parse a unicast device ID (0..=253; 254 is broadcast, 255 is not an ID).
 #[allow(dead_code)]
 pub fn parse_id(v: &str) -> Result<u8, String> {
     let id: u8 = v
         .parse()
-        .map_err(|_| format!("invalid ID: {v} (want 0..=252)"))?;
+        .map_err(|_| format!("invalid ID: {v} (want 0..=253)"))?;
     if id > ftservo::MAX_ID {
-        return Err(format!("ID out of range: {id} (want 0..=252)"));
+        return Err(format!("ID out of range: {id} (want 0..=253)"));
     }
     Ok(id)
 }

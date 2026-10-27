@@ -1,8 +1,8 @@
 //! Connectivity, model and firmware probe for all device types.
 //! Mirrors the upstream sms_sts/scscl/hls/imu `ping.py` examples.
 //!
-//! Without an ID, every valid unicast ID (0..=252; 253 is reserved and 254
-//! is broadcast) is probed with the bare PING instruction. Any device that
+//! Without an ID, every valid unicast ID (0..=253; 254 is broadcast) is
+//! probed with the bare PING instruction. Any device that
 //! answers is followed by one READ of the five read-only EPROM bytes at
 //! addresses 0..=4 (firmware version, one reserved byte, model number). The
 //! bytes are shown per address, never composed into one integer, so no byte

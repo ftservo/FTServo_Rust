@@ -32,8 +32,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         ..Motion::default()
     };
     servo.reg_write_position(&r, motion)?;
-    println!("registered; sending Action to start the motion");
-    servo.action(&r, id)?;
+    // Broadcast ACTION, as the upstream `RegAction` does: every servo that took a registered
+    // write starts on this one transaction, not only the one addressed.
+    println!("registered; sending a broadcast Action to start the motion");
+    servo.reg_action(&r)?;
     bus.close()?;
     Ok(())
 }
