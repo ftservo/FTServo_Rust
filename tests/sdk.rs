@@ -193,6 +193,25 @@ fn reply_from_another_device_is_reported() {
     ));
 }
 #[test]
+fn id_253_is_addressable_and_254_is_broadcast_only() {
+    // Device IDs run 0..=253, 254 is broadcast and 255 is never an ID. `ping` on 253 has to
+    // reach the wire and its reply has to pass validation — an off-by-one here would make a
+    // device at the top of the range invisible while every other test still passed.
+    let (p, s) = Mock::new(ack);
+    let b = bus(p);
+    let r = Request::new();
+    b.ping(&r, 253).unwrap();
+    assert_eq!(s.lock().unwrap().packets[0][2], 253);
+    assert!(matches!(
+        b.ping(&r, 255),
+        Err(Error::InvalidArgument("unicast ID"))
+    ));
+    assert!(matches!(
+        b.read(&r, BROADCAST_ID, registers::PRESENT_POSITION, 2),
+        Err(Error::InvalidArgument(_))
+    ));
+}
+#[test]
 fn decoded_frames_expose_their_status_code() {
     let (p, _) = Mock::new(|_| [status(1, 0, &[0; 15]), status(2, 1, &[0; 15])].concat());
     let b = bus(p);
@@ -831,4 +850,142 @@ fn the_read_window_follows_the_bytes_in_hand() {
     // The fixed delay is counted on every read, so neither window can fall below it.
     assert!(dribbled >= DEFAULT_READ_DELAY);
     assert!(whole >= DEFAULT_READ_DELAY);
+}
+
+// Wire parity with the official Python SDK --------------------------------------------------
+//
+// The vectors below are what `scservo_sdk/{sms_sts,hls,scscl}.py` puts on the wire, written out
+// by hand from those sources rather than produced by this crate: `WritePosEx` /
+// `SyncWritePosEx` / `RegWritePosEx` pack 7 bytes at address 41 for SMS/STS and HLS, `WritePos`
+// packs 6 big-endian bytes at 42 for SCSCL, and `reOfsCal` packs the position through the
+// family's word order. A family table read off the wrong row changes these bytes silently,
+// which is what these cases are for.
+
+/// The parameters of packet `n`: everything between the instruction byte and the checksum.
+///
+/// Compared instead of the whole frame so the assertion stays about the layout the Python SDK
+/// defines (start address, field order, byte order); the checksum byte is covered by the codec
+/// cases above.
+fn params(s: &Arc<Mutex<State>>, n: usize) -> Vec<u8> {
+    let st = s.lock().unwrap();
+    let p = &st.packets[n];
+    p[5..p.len() - 1].to_vec()
+}
+/// `(id, instruction)` of packet `n`.
+fn head(s: &Arc<Mutex<State>>, n: usize) -> (u8, u8) {
+    let st = s.lock().unwrap();
+    let p = &st.packets[n];
+    (p[2], p[4])
+}
+
+#[test]
+fn sms_sts_frames_match_the_python_sdk() {
+    // sms_sts.py: 7 bytes at ACC=41 — [acc, posL, posH, 0, 0, speedL, speedH], the two zeros
+    // being the goal-time field the Python frame never sets. Position is 15-bit
+    // sign-magnitude, so -100 is 0x8064 and goes out little-endian.
+    let (p, s) = Mock::new(ack);
+    let servo = Servo::sms_sts(bus(p));
+    let r = Request::new();
+    let m = Motion {
+        id: 1,
+        position: -100,
+        speed: 200,
+        acceleration: 3,
+        ..Motion::default()
+    };
+    let wanted = vec![41, 3, 0x64, 0x80, 0, 0, 0xC8, 0];
+
+    servo.write_position(&r, m).unwrap();
+    servo.reg_write_position(&r, m).unwrap();
+    servo.sync_write_position(&r, &[m]).unwrap();
+
+    assert_eq!(head(&s, 0), (1, WRITE));
+    assert_eq!(params(&s, 0), wanted);
+    assert_eq!(head(&s, 1), (1, REG_WRITE));
+    assert_eq!(params(&s, 1), wanted);
+    // Sync write is a broadcast: address, entry length, then id + the same 7-byte frame.
+    assert_eq!(head(&s, 2), (BROADCAST_ID, SYNC_WRITE));
+    assert_eq!(params(&s, 2), vec![41, 7, 1, 3, 0x64, 0x80, 0, 0, 0xC8, 0]);
+}
+
+#[test]
+fn hls_frames_match_the_python_sdk() {
+    // hls.py: the same 7 bytes at ACC=41, but the two middle bytes are the goal torque
+    // (`HLS_GOAL_TORQUE_L/H = 44/45`) rather than a field that stays zero.
+    let (p, s) = Mock::new(ack);
+    let servo = Servo::hls(bus(p));
+    let r = Request::new();
+    let m = Motion {
+        id: 2,
+        position: -1234,
+        speed: 300,
+        acceleration: 20,
+        torque: 500,
+        ..Motion::default()
+    };
+    servo.write_position(&r, m).unwrap();
+    servo.sync_write_position(&r, &[m]).unwrap();
+
+    let wanted = vec![41, 20, 0xD2, 0x84, 0xF4, 0x01, 0x2C, 0x01];
+    assert_eq!(head(&s, 0), (2, WRITE));
+    assert_eq!(params(&s, 0), wanted);
+    assert_eq!(head(&s, 1), (BROADCAST_ID, SYNC_WRITE));
+    assert_eq!(
+        params(&s, 1),
+        vec![41, 7, 2, 20, 0xD2, 0x84, 0xF4, 0x01, 0x2C, 0x01]
+    );
+}
+
+#[test]
+fn scscl_frames_match_the_python_sdk() {
+    // scscl.py: 6 bytes at GOAL_POSITION=42 — [pos, time, speed] — all big-endian, because this
+    // family's handler is built with endian=1. PWM is `write2ByteTxRx(GOAL_TIME=44)` with the
+    // value in 10-bit sign-magnitude, so it is big-endian too; PWM mode is four zero bytes at
+    // MIN_ANGLE=9 (`PWMMode`).
+    let (p, s) = Mock::new(ack);
+    let servo = Servo::scscl(bus(p));
+    let r = Request::new();
+    let m = Motion {
+        id: 3,
+        position: 1000,
+        time: 5,
+        speed: 300,
+        ..Motion::default()
+    };
+
+    servo.write_position(&r, m).unwrap();
+    servo.write_pwm(&r, 3, -1000).unwrap();
+    servo.pwm_mode(&r, 3).unwrap();
+
+    assert_eq!(head(&s, 0), (3, WRITE));
+    assert_eq!(
+        params(&s, 0),
+        vec![42, 0x03, 0xE8, 0x00, 0x05, 0x01, 0x2C]
+    );
+    // -1000 in 10-bit sign-magnitude is 1000 | 0x0400 = 0x07E8 — bit 10 is the direction bit,
+    // and the magnitude fits in the ten bits below it — big-endian on the wire.
+    assert_eq!(params(&s, 1), vec![44, 0x07, 0xE8]);
+    assert_eq!(params(&s, 2), vec![9, 0, 0, 0, 0]);
+}
+
+#[test]
+fn reg_action_broadcasts_and_offset_follows_word_order() {
+    // Every Python family defines `RegAction()` as `action(BROADCAST_ID)`: one transaction that
+    // releases every servo armed by a registered write.
+    let (p, s) = Mock::new(ack);
+    let hls = Servo::hls(bus(p));
+    let r = Request::new();
+    hls.reg_action(&r).unwrap();
+    assert_eq!(head(&s, 0), (BROADCAST_ID, ACTION));
+    assert!(params(&s, 0).is_empty());
+    // A broadcast is never answered, so nothing was waited for.
+    assert_eq!(s.lock().unwrap().packets.len(), 1);
+
+    // `reOfsCal` packs the position through the family's word order — little-endian here —
+    // and carries no register address, only the two bytes.
+    let (p, s) = Mock::new(ack);
+    let hls = Servo::hls(bus(p));
+    hls.calibrate_offset(&r, 1, 0x1234).unwrap();
+    assert_eq!(head(&s, 0), (1, OFFSET_CALIBRATION));
+    assert_eq!(params(&s, 0), vec![0x34, 0x12]);
 }
